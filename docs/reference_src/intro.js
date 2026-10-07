@@ -1,0 +1,43 @@
+const { Paragraph, TextRun, AlignmentType, TableOfContents } = require('docx');
+module.exports = ({ p, h2, bullets, code, table }, nDays) => [
+  new Paragraph({ alignment: AlignmentType.CENTER, spacing: { before: 2400, after: 200 }, children: [new TextRun({ text: 'ForgeML', bold: true, size: 64, color: '1F4E79' })] }),
+  new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 200 }, children: [new TextRun({ text: 'Справочник по коду: классы, методы, функции и идеи C++', size: 30, color: '444444' })] }),
+  new Paragraph({ alignment: AlignmentType.CENTER, spacing: { after: 1200 }, children: [new TextRun({ text: `Охвачено дней: ${nDays} из 7`, size: 24, italics: true, color: '666666' })] }),
+  h2('Как пользоваться справочником'),
+  ...bullets([
+    'Каждый день — отдельная глава. В начале главы таблица-оглавление: что появилось и в каком файле.',
+    'Каждый метод описан карточкой: **сигнатура** → **что делает** → **как работает** → **пример** → **важно** (подводные камни).',
+    'В конце каждой главы — раздел «Идеи C++ этого дня»: языковые приёмы, которые встретились в коде, объяснённые отдельно.',
+    'Обозначения: `моноширинный текст` — код; «внутренняя функция» — живёт в анонимном namespace и не видна снаружи файла.',
+  ]),
+  h2('Оглавление'),
+  p('Чтобы оглавление заполнилось номерами страниц, в Word нажмите на него правой кнопкой → «Обновить поле».'),
+  new TableOfContents('Оглавление', { hyperlink: true, headingStyleRange: '1-2' }),
+  h2('Общая архитектура тензора'),
+  p('Тензор в ForgeML устроен в три слоя — так же, как в настоящем PyTorch:'),
+  ...code([
+    'Tensor (handle)  --shared_ptr-->  TensorImpl  --shared_ptr-->  Storage',
+    ' лёгкий, копируется               shape, strides, offset,      std::vector<float>',
+    ' как указатель                    requires_grad, grad, grad_fn  (сами числа)',
+  ]),
+  table(['Слой', 'Отвечает за', 'Кто его делит'], [
+    ['`Storage`', 'плоский массив чисел в памяти', 'все views одного тензора (transpose, view, expand…)'],
+    ['`TensorImpl`', 'как читать Storage: форма, шаги, сдвиг; поля autograd', 'все копии handle (`Tensor b = a;`)'],
+    ['`Tensor`', 'удобный интерфейс: фабрики, методы, операторы', '—'],
+  ], [1800, 3900, 3900]),
+  p(''),
+  p('Главная формула всего проекта — адрес элемента в плоском массиве:'),
+  ...code(['позиция = offset + index[0]*strides[0] + index[1]*strides[1] + ...']),
+  h2('Карта библиотеки'),
+  table(['Модуль', 'Пространство имён', 'День', 'Назначение'], [
+    ['`tensor.h`', '`forge`', '1–2', 'Tensor, память, views'],
+    ['`ops.h`', '`forge`', '2, 4', 'математика, broadcasting, matmul, softmax'],
+    ['`autograd.h`', '`forge`', '3–4', 'граф вычислений, backward, NoGradGuard'],
+    ['`nn.h`', '`forge::nn`', '5', 'Module, слои, функции потерь'],
+    ['`optim.h`', '`forge::optim`', '5', 'SGD, Adam'],
+    ['`data.h`', '`forge::data`', '6', 'Dataset, DataLoader, MNIST'],
+    ['`console.h`, `forge.h`', '`forge`', '7', 'UTF-8 консоль, общий заголовок'],
+  ], [2200, 2000, 1000, 4400]),
+  p(''),
+  p('Как собрать и запустить проект, описано в `README.md` в корне репозитория. Этот справочник объясняет, **как устроен** каждый класс и метод.'),
+];

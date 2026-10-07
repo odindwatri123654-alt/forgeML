@@ -1,0 +1,118 @@
+module.exports = ({ p, h1, h2, h3, bullets, code, entry, table }) => [
+  h1('День 7. Тесты, инструменты, полировка'),
+  p('Цель дня: убедиться, что всё работает, и сделать проект удобным: тесты без зависимостей, кроссплатформенная сборка, скрипты, документация.'),
+  h2('Что появилось в этот день'),
+  table(['Сущность', 'Вид', 'Файл'], [
+    ['`TEST`, `CHECK`, `CHECK_NEAR`, `CHECK_THROWS`', 'макросы', 'tests/test_framework.h'],
+    ['`testing::TestCase`, `registry`, `Registrar`, `Failure`', 'тестовый фреймворк', 'tests/test_framework.h'],
+    ['`main` тестов', 'функция', 'tests/test_main.cpp'],
+    ['41 тест', 'тесты', 'tests/test_*.cpp'],
+    ['`enable_utf8_console`', 'функция', 'console.h / console.cpp'],
+    ['`forge.h`', 'общий заголовок', 'include/forge/'],
+    ['опции CMake, `ctest`', 'сборка', 'CMakeLists.txt'],
+    ['`README.md`', 'документация', 'корень'],
+  ], [5200, 2200, 2200]),
+
+  h2('Тестовый фреймворк'),
+  p('Вместо GoogleTest — ~80 строк своего кода: ничего не нужно скачивать, и каждая деталь понятна.'),
+  ...entry({
+    name: '`TEST(name)`', file: 'tests/test_framework.h',
+    sig: ['#define TEST(name)                                                  \\', '    static void name();                                             \\', '    static const testing::Registrar name##_registrar(#name, &name); \\', '    static void name()'],
+    what: 'Объявляет тест. После макроса пишется тело в фигурных скобках.',
+    how: [
+      'Объявляет функцию `name`.',
+      'Создаёт глобальный объект `name_registrar`; его конструктор (выполняется **до** `main`) добавляет тест в общий список.',
+      'Начинает определение функции — фигурные скобки после `TEST(...)` становятся её телом.',
+    ],
+    example: ['TEST(my_feature) {', '    CHECK(1 + 1 == 2);', '}'],
+  }),
+  ...entry({
+    name: '`CHECK`, `CHECK_NEAR`, `CHECK_THROWS`',
+    sig: ['CHECK(cond)              // условие истинно', 'CHECK_NEAR(a, b, tol)    // |a - b| <= tol', 'CHECK_THROWS(expr)       // выражение бросает std::exception'],
+    what: 'Проверки. При провале бросают `testing::Failure` с текстом «файл:строка: что не так».',
+    notes: ['`#cond` превращает выражение в строку, `__FILE__`/`__LINE__` — место в коде.', 'Обёртка `do { ... } while (0)` делает макрос одной инструкцией: он безопасен внутри `if` без фигурных скобок.'],
+  }),
+  ...entry({
+    name: '`testing::registry()`, `Registrar`, `TestCase`, `Failure`',
+    sig: ['struct TestCase { const char* name; void (*fn)(); };', 'inline std::vector<TestCase>& registry();', 'struct Registrar { Registrar(const char* name, void (*fn)()); };', 'struct Failure : std::runtime_error { using std::runtime_error::runtime_error; };'],
+    what: 'Внутренности фреймворка: список тестов, «регистратор», тип ошибки.',
+    notes: ['`registry()` хранит вектор как `static` внутри функции: он создаётся при первом обращении. Это решает проблему «порядка инициализации глобальных объектов» между разными .cpp.', '`inline` позволяет определить функцию в заголовке, подключённом в несколько .cpp, без ошибки «multiple definition».', '`using std::runtime_error::runtime_error;` — наследование конструкторов.'],
+  }),
+  ...entry({
+    name: '`main` в test_main.cpp',
+    what: 'Запускает все тесты по очереди, ловит исключения, печатает `[  OK  ]` / `[ FAIL ]` и итог «41/41 tests passed». Код возврата 0 — всё прошло, 1 — есть провалы (это читает `ctest`).',
+  }),
+
+  h2('Что покрыто тестами'),
+  table(['Файл', 'Что проверяет'], [
+    ['test_tensor.cpp', 'strides, фабрики, воспроизводимость random, at и границы, общая память копий и views, transpose/permute/expand/unsqueeze, clone, печать, пустой тензор'],
+    ['test_ops.cpp', 'broadcasting, поэлементные операции, редукции (в т.ч. по транспонированному), softmax на больших числах, matmul против наивного двойного цикла'],
+    ['test_autograd.cpp', 'простые цепочки, повторное использование тензора, накопление и zero_grad, NoGradGuard и detach, broadcasting в backward, gradcheck всех операций и views'],
+    ['test_nn.cpp', 'формы и имена параметров, функции потерь, Dropout в train/eval, шаги SGD и Adam, обучение XOR, save/load, DataLoader'],
+  ], [2400, 7200]),
+
+  h2('Проверки, через которые прошёл проект'),
+  ...bullets([
+    'GCC с `-Wall -Wextra -Wpedantic -Wconversion -Wshadow -Werror` — ни одного предупреждения.',
+    'Clang с теми же флагами — ни одного предупреждения.',
+    'AddressSanitizer + UndefinedBehaviorSanitizer (Debug): тесты, примеры и загрузка MNIST — без ошибок памяти и неопределённого поведения.',
+    'Сборка без OpenMP (`-DFORGE_USE_OPENMP=OFF`).',
+    'Мутационная проверка: намеренно испорченные формулы производных ловятся тестами.',
+    'Реальное обучение: XOR, sin(x), MNIST 97.6 %.',
+  ]),
+  p('MSVC в моём окружении недоступен; код написан с учётом его особенностей (`/utf-8`, `/W4`, OpenMP 2.0, `NOMINMAX`).'),
+
+  h2('Удобства'),
+  ...entry({
+    name: '`enable_utf8_console()`', file: 'include/forge/console.h, src/console.cpp',
+    sig: ['void enable_utf8_console();'],
+    what: 'На Windows переключает консоль в UTF-8 (`SetConsoleOutputCP(CP_UTF8)`), чтобы русский текст не превращался в «кракозябры». На других системах ничего не делает.',
+    notes: ['`#define NOMINMAX` перед `<windows.h>` обязателен: иначе windows.h определит макросы `min`/`max`, и препроцессор испортит вызовы `forge::max` и `std::max`.', 'Код под `#ifdef _WIN32` компилируется только на Windows.'],
+  }),
+  ...entry({
+    name: '`forge/forge.h`',
+    sig: ['#include <forge/forge.h>   // tensor, ops, autograd, nn, optim, data, console'],
+    what: 'Подключает всю библиотеку одной строкой.',
+  }),
+
+  h2('Сборка: итоговый CMakeLists.txt'),
+  ...bullets([
+    '`option(FORGE_BUILD_TESTS ...)`, `FORGE_BUILD_EXAMPLES`, `FORGE_USE_OPENMP` — включаемые части; задаются `-DFORGE_USE_OPENMP=OFF`.',
+    'Для Ninja/Make по умолчанию Release (`CMAKE_BUILD_TYPE`); у Visual Studio конфигурация выбирается при сборке (`--config Release`).',
+    '`foreach(example ...)` — один цикл создаёт все примеры.',
+    '`enable_testing()` + `add_test` — тесты запускаются командой `ctest`.',
+    '`target_link_libraries(forge PUBLIC OpenMP::OpenMP_CXX)` — PUBLIC, потому что флаги OpenMP нужны и тем, кто линкует forge.',
+  ]),
+  h2('Скрипты'),
+  ...bullets([
+    '`scripts/download_mnist.ps1` — Windows PowerShell: `Invoke-WebRequest` + распаковка .gz через .NET `GZipStream`. Файл сохранён в UTF-8 с BOM, чтобы PowerShell 5 правильно читал русский текст.',
+    '`scripts/download_mnist.sh` — bash: `curl` + `gunzip`. Уже скачанные файлы пропускаются.',
+  ]),
+
+  h2('Структура итогового проекта'),
+  ...code([
+    'forgeml/',
+    '├── CMakeLists.txt',
+    '├── README.md                    документация по использованию',
+    '├── include/forge/  forge.h tensor.h autograd.h ops.h nn.h optim.h data.h console.h',
+    '├── src/            tensor.cpp autograd.cpp ops.cpp nn.cpp optim.cpp data.cpp console.cpp',
+    '├── examples/       playground autograd_demo xor regression mnist',
+    '├── tests/          test_framework.h test_main.cpp test_tensor/ops/autograd/nn.cpp',
+    '├── scripts/        download_mnist.ps1 download_mnist.sh',
+    '└── docs/           ForgeML_reference.docx (этот справочник)',
+  ]),
+
+  h2('Идеи C++ этого дня'),
+  h3('Макросы: # и ##'),
+  p('`#x` — превратить аргумент макроса в строку («stringify»). `a##b` — склеить два токена в один идентификатор: `name##_registrar` → `my_test_registrar`.'),
+  h3('Статическая регистрация'),
+  p('Глобальный объект с конструктором, который что-то делает, выполняется до `main`. Так тесты «сами» попадают в список, и `main` о них ничего не знает.'),
+  h3('static у функций и переменных в .cpp'),
+  p('`static void my_test()` — внутренняя связность, как анонимный namespace: тесты с одинаковыми именами в разных файлах не конфликтуют.'),
+  h3('Условная компиляция'),
+  p('`#ifdef _WIN32`, `#if defined(_OPENMP)` — код включается или выключается препроцессором в зависимости от платформы и флагов компилятора.'),
+  h3('Код возврата main'),
+  p('`return 0` — успех, не ноль — ошибка. Его читают ctest, скрипты, CI.'),
+  h3('Санитайзеры'),
+  p('`-fsanitize=address` ловит выход за границы массивов и use-after-free, `-fsanitize=undefined` — переполнения, некорректные сдвиги и другие виды UB. Включаются флагами компилятора в отладочной сборке.'),
+];

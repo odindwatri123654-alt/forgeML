@@ -1,0 +1,106 @@
+module.exports = ({ p, h1, h2, h3, bullets, code, entry, table }) => [
+  h1('День 6. Данные, MNIST и производительность'),
+  p('Цель дня: обучить настоящую сеть на настоящих данных — 60 000 рукописных цифр MNIST — и достичь точности ≥ 97 %. Результат: **97.6 % за 5 эпох**, около 4 секунд на эпоху (Release, 4 ядра).'),
+  h2('Что появилось в этот день'),
+  table(['Сущность', 'Вид', 'Файл'], [
+    ['`data::Dataset`', 'структура', 'data.h'],
+    ['`data::load_mnist`', 'функция', 'data.cpp'],
+    ['`data::DataLoader`', 'класс', 'data.h / data.cpp'],
+    ['`read_be_u32`, `open_idx`, `read_bytes`, `gather_rows`', 'внутренние', 'data.cpp'],
+    ['`matmul_values` + OpenMP', 'внутренняя', 'ops.cpp'],
+    ['`examples/mnist.cpp`', 'пример', 'examples/'],
+    ['`scripts/download_mnist.ps1`, `.sh`', 'скрипты', 'scripts/'],
+  ], [5200, 2200, 2200]),
+
+  h2('MNIST и формат IDX'),
+  p('MNIST — 70 000 картинок 28×28 пикселей с рукописными цифрами (60 000 для обучения, 10 000 для проверки). Файлы в формате IDX:'),
+  ...code(['images: [magic = 2051][N][rows = 28][cols = 28][N·28·28 байт пикселей 0..255]', 'labels: [magic = 2049][N][N байт с цифрами 0..9]', 'все заголовочные числа — uint32 big-endian']),
+  ...entry({
+    name: 'struct `data::Dataset`', file: 'include/forge/data.h',
+    sig: ['struct Dataset {', '    Tensor inputs;   // [N, ...]', '    Tensor targets;  // [N] или [N, ...]', '    std::size_t size() const;', '};'],
+    what: 'Набор примеров: i-я строка `inputs` — вход, i-я строка `targets` — правильный ответ.',
+    example: ['data::Dataset ds{Tensor::randn({100, 3}), Tensor::zeros({100})};'],
+  }),
+  ...entry({
+    name: '`data::load_mnist(images_path, labels_path)`',
+    sig: ['Dataset load_mnist(const std::string& images_path, const std::string& labels_path);'],
+    what: 'Читает распакованные IDX-файлы. Возвращает inputs `[N, 784]` с пикселями в [0, 1] и targets `[N]` с цифрами.',
+    how: ['Проверяет magic-числа и совпадение количества картинок и меток.', 'Картинка 28×28 «расплющивается» в вектор из 784 чисел — MLP не знает о двумерности.', 'Пиксели делятся на 255: входы порядка единицы обучаются стабильнее, чем 0..255.'],
+    notes: ['Понятные ошибки: «cannot open … (run scripts/download_mnist first)», «not an IDX file», «file is truncated».'],
+  }),
+  ...entry({
+    name: '`read_be_u32(in)` (внутренняя)',
+    sig: ['std::uint32_t read_be_u32(std::ifstream& in);'],
+    what: 'Читает 4 байта и собирает число «старший байт первым»: `(b0 << 24) | (b1 << 16) | (b2 << 8) | b3`.',
+    notes: ['Процессоры x86/ARM хранят числа little-endian (младший байт первым). Сборка вручную делает код независимым от процессора.'],
+  }),
+  ...bullets([
+    '`open_idx(path, magic)` — открывает файл и проверяет magic-число.',
+    '`read_bytes(in, count)` — читает блок байт с проверкой, что файл не обрезан.',
+  ]),
+
+  h2('DataLoader'),
+  ...entry({
+    name: 'class `data::DataLoader`',
+    sig: ['DataLoader(Dataset dataset, std::size_t batch_size, bool shuffle = true, unsigned seed = 0);', 'std::size_t num_batches() const;', 'std::pair<Tensor, Tensor> batch(std::size_t index) const;', 'void reshuffle();'],
+    what: 'Делит датасет на мини-батчи и перемешивает порядок примеров каждую эпоху.',
+    how: [
+      'Хранит перестановку `order_` (сначала 0, 1, …, N−1 через `std::iota`), перемешивает её `std::shuffle` со своим генератором `std::mt19937`.',
+      '`num_batches = ⌈N / batch_size⌉` — последний батч может быть меньше.',
+      '`batch(i)` копирует строки `order_[i·B .. (i+1)·B)` в новые тензоры (`gather_rows`).',
+    ],
+    example: ['data::DataLoader loader(train, 64, true);', 'for (int epoch = 0; epoch < 5; ++epoch) {', '    loader.reshuffle();', '    for (std::size_t b = 0; b < loader.num_batches(); ++b) {', '        auto [x, y] = loader.batch(b);', '    }', '}'],
+    notes: [
+      '**Зачем мини-батчи:** градиент по 64 примерам почти так же информативен, как по 60 000, но считается в 1000 раз быстрее. Шум градиента даже помогает обобщению.',
+      '**Зачем перемешивать:** иначе сеть каждую эпоху видит примеры в одном порядке и может «подстраиваться» под него.',
+      'Строки inputs и targets перемешиваются **одной** перестановкой — пары (картинка, метка) не разрываются.',
+    ],
+  }),
+
+  h2('Пример mnist.cpp'),
+  ...code(['784 входа ─► Linear(784,128) ─► ReLU ─► Linear(128,10) ─► 10 логитов', 'параметров: 784·128 + 128 + 128·10 + 10 = 101 770', 'оптимизатор: Adam, lr = 1e-3; батч 64; loss: cross_entropy']),
+  ...bullets([
+    'Запуск: `mnist [папка_с_данными] [эпохи]`; по умолчанию папка `<корень проекта>/data` (макрос `FORGE_DATA_DIR` из CMake) и 5 эпох.',
+    '`evaluate` считает точность на тестовой выборке под `NoGradGuard` и в режиме `eval()`, затем возвращает `train()`.',
+    'Время эпохи измеряется `std::chrono::steady_clock`.',
+    'После обучения веса сохраняются в `mnist_mlp.bin`.',
+    'Ошибки (нет файлов) ловятся в `main` и печатаются понятным сообщением, код возврата 1.',
+  ]),
+  table(['Эпоха', 'loss', 'точность на test'], [
+    ['1', '0.347', '94.4 %'], ['2', '0.159', '96.1 %'], ['3', '0.111', '96.6 %'], ['4', '0.084', '97.2 %'], ['5', '0.066', '97.6 %'],
+  ], [2000, 2500, 3000]),
+
+  h2('Производительность'),
+  ...entry({
+    name: '`matmul_values(a, b)` (внутренняя, ops.cpp)',
+    sig: ['Tensor matmul_values(const Tensor& a, const Tensor& b);'],
+    what: 'Только числа `C = A·B` (без графа). Используется и в прямом проходе `matmul`, и в его backward.',
+    how: [
+      'Порядок циклов i-k-j (из дня 2): внутренний цикл идёт по памяти подряд, компилятор векторизует его (SIMD — несколько float за одну инструкцию).',
+      'Строки результата независимы — внешний цикл распараллелен: `#pragma omp parallel for if (big)`.',
+      '`if (big)` — потоки запускаются только для больших матриц (n·k·m ≥ 65536): для маленьких запуск потоков дороже самого умножения.',
+    ],
+    notes: ['MSVC поддерживает OpenMP 2.0, где счётчик параллельного цикла обязан быть знаковым — поэтому `std::ptrdiff_t ii`.', '`#if defined(_OPENMP)` — без OpenMP прагма просто не попадает в код.'],
+  }),
+  ...bullets([
+    '**Release против Debug:** в Debug нет оптимизаций и векторизации, а проверки STL включены — обучение в 10–50 раз медленнее. Для MNIST всегда выбирайте Release.',
+    '**Где тратится время:** почти всё — в `matmul` (прямой проход и два умножения в backward на каждый слой). Поэтому ускоряли именно его.',
+    '**Цена простоты:** `binary_op` материализует broadcasting (`expand → contiguous`). Для bias `[128]` на батч `[64, 128]` это 8 192 числа — копейки по сравнению с matmul.',
+  ]),
+
+  h2('Идеи C++ этого дня'),
+  h3('Бинарный ввод-вывод'),
+  p('`std::ifstream in(path, std::ios::binary)` и `in.read(char*, n)` — чтение «сырых» байт без преобразований. `reinterpret_cast<char*>(&x)` — посмотреть на память числа как на байты.'),
+  h3('Порядок байт (endianness)'),
+  p('Big-endian — старший байт первым (сетевые протоколы, IDX), little-endian — младший первым (x86, ARM). Сборка числа сдвигами `<<` и `|` не зависит от процессора.'),
+  h3('std::iota и std::shuffle'),
+  p('`std::iota(begin, end, 0)` заполняет 0, 1, 2, …; `std::shuffle(begin, end, rng)` — случайная перестановка (алгоритм Фишера–Йейтса).'),
+  h3('std::pair и structured bindings'),
+  p('`batch()` возвращает `std::pair<Tensor, Tensor>`, а `auto [x, y] = loader.batch(b);` раскладывает его на две переменные.'),
+  h3('std::chrono'),
+  p('`steady_clock` — монотонные часы для измерения интервалов (не прыгают при переводе системного времени).'),
+  h3('OpenMP'),
+  p('Стандарт параллелизации через прагмы: `#pragma omp parallel for` раздаёт итерации цикла потокам. В CMake подключается через `find_package(OpenMP)` и `OpenMP::OpenMP_CXX`.'),
+  h3('Макросы препроцессора из CMake'),
+  p('`target_compile_definitions(mnist PRIVATE FORGE_DATA_DIR="...")` создаёт макрос при компиляции. В коде `#ifndef FORGE_DATA_DIR #define FORGE_DATA_DIR "data"` — значение по умолчанию, если CMake его не задал.'),
+];
