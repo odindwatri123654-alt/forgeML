@@ -70,8 +70,10 @@ if(FORGE_BUILD_TESTS)
         tests/test_ops.cpp
         tests/test_autograd.cpp
         tests/test_nn.cpp
+        tests/test_regressions.cpp
     )
-    target_link_libraries(forge_tests PRIVATE forge)
+    find_package(Threads REQUIRED)
+    target_link_libraries(forge_tests PRIVATE forge Threads::Threads)
     add_test(NAME forge_tests COMMAND forge_tests)
 endif()
 

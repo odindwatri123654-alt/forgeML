@@ -39,7 +39,7 @@ SGD::SGD(std::vector<Tensor> params, float lr, float momentum, float weight_deca
 void SGD::step() {
     for (std::size_t i = 0; i < params_.size(); ++i) {
         Tensor& p = params_[i];
-        Tensor grad = p.grad();
+        const Tensor grad = p.grad();
         if (!grad.defined()) {
             continue;  // параметр не участвовал в вычислении loss
         }
@@ -83,7 +83,7 @@ void Adam::step() {
 
     for (std::size_t i = 0; i < params_.size(); ++i) {
         Tensor& p = params_[i];
-        Tensor grad = p.grad();
+        const Tensor grad = p.grad();
         if (!grad.defined()) {
             continue;
         }

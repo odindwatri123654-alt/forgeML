@@ -2,6 +2,7 @@
 #include <forge/nn.h>
 #include <forge/ops.h>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
@@ -99,7 +100,7 @@ void Module::save(const std::string& path) const {
         for (std::size_t d : param.shape()) {
             write_u64(out, d);
         }
-        Tensor values = param.detach().contiguous();
+        const Tensor values = param.detach().contiguous();
         out.write(reinterpret_cast<const char*>(values.data()),
                   static_cast<std::streamsize>(values.numel() * sizeof(float)));
     }
@@ -119,24 +120,40 @@ void Module::load(const std::string& path) {
     if (read_u64(in) != params.size()) {
         throw std::runtime_error("load(): number of parameters does not match the model");
     }
+    // Сначала читаем и проверяем ВЕСЬ файл во временные буферы,
+    // и только потом копируем в модель: при любой ошибке модель не меняется.
+    std::vector<std::vector<float>> loaded;
     for (auto& [name, param] : params) {
-        std::string file_name(read_u64(in), '\0');
+        std::uint64_t name_size = read_u64(in);
+        if (name_size > 4096) {
+            throw std::runtime_error("load(): corrupted file (parameter name too long)");
+        }
+        std::string file_name(static_cast<std::size_t>(name_size), '\0');
         in.read(file_name.data(), static_cast<std::streamsize>(file_name.size()));
-        Shape shape(read_u64(in));
+        std::uint64_t ndim = read_u64(in);
+        if (ndim > 64) {
+            throw std::runtime_error("load(): corrupted file (too many dimensions)");
+        }
+        Shape shape(static_cast<std::size_t>(ndim));
         for (std::size_t& d : shape) {
-            d = read_u64(in);
+            d = static_cast<std::size_t>(read_u64(in));
         }
         if (file_name != name || shape != param.shape()) {
             throw std::runtime_error("load(): expected " + name + " " +
                                      shape_to_string(param.shape()) + ", found " + file_name +
                                      " " + shape_to_string(shape));
         }
-        // параметры — contiguous листья, поэтому пишем прямо в их память
-        in.read(reinterpret_cast<char*>(param.data()),
-                static_cast<std::streamsize>(param.numel() * sizeof(float)));
+        std::vector<float> values(param.numel());
+        in.read(reinterpret_cast<char*>(values.data()),
+                static_cast<std::streamsize>(values.size() * sizeof(float)));
         if (!in) {
             throw std::runtime_error("load(): unexpected end of file");
         }
+        loaded.push_back(std::move(values));
+    }
+    // Всё прочитано без ошибок — переносим в параметры (contiguous листья).
+    for (std::size_t i = 0; i < params.size(); ++i) {
+        std::copy(loaded[i].begin(), loaded[i].end(), params[i].second.data());
     }
 }
 
@@ -145,6 +162,11 @@ void Module::load(const std::string& path) {
 // ============================================================
 
 Linear::Linear(std::size_t in_features, std::size_t out_features, bool with_bias) {
+    if (in_features == 0 || out_features == 0) {
+        throw std::invalid_argument("Linear: in_features and out_features must be > 0, got " +
+                                    std::to_string(in_features) + " and " +
+                                    std::to_string(out_features));
+    }
     // Как в PyTorch: веса из U(-k, k), k = 1/sqrt(in_features).
     // Так начальные выходы слоя не слишком большие и не слишком маленькие.
     float k = 1.0f / std::sqrt(static_cast<float>(in_features));
@@ -233,11 +255,17 @@ Tensor cross_entropy(const Tensor& logits, const Tensor& targets) {
 
     // one-hot: в строке i единица стоит в столбце правильного класса
     Tensor one_hot = Tensor::zeros({n, c});
-    Tensor t = targets.detach().contiguous();
+    const Tensor t = targets.detach().contiguous();
     for (std::size_t i = 0; i < n; ++i) {
         float cls = t.data()[i];
-        if (cls < 0.0f || static_cast<std::size_t>(cls) >= c) {
-            throw std::invalid_argument("cross_entropy(): class index out of range");
+        // !(cls >= 0) ловит и отрицательные числа, и NaN
+        if (!(cls >= 0.0f) || static_cast<std::size_t>(cls) >= c) {
+            throw std::invalid_argument("cross_entropy(): class index " + std::to_string(cls) +
+                                        " out of range [0, " + std::to_string(c) + ")");
+        }
+        if (cls != std::floor(cls)) {
+            throw std::invalid_argument("cross_entropy(): class index must be an integer, got " +
+                                        std::to_string(cls));
         }
         one_hot.data()[i * c + static_cast<std::size_t>(cls)] = 1.0f;
     }
@@ -248,8 +276,8 @@ Tensor cross_entropy(const Tensor& logits, const Tensor& targets) {
 
 float accuracy(const Tensor& logits, const Tensor& targets) {
     check_classification(logits, targets, "accuracy()");
-    Tensor predicted = argmax(logits, 1);
-    Tensor t = targets.detach().contiguous();
+    const Tensor predicted = argmax(logits, 1);
+    const Tensor t = targets.detach().contiguous();
     std::size_t correct = 0;
     for (std::size_t i = 0; i < predicted.numel(); ++i) {
         if (predicted.data()[i] == t.data()[i]) {

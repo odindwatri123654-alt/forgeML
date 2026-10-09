@@ -25,7 +25,8 @@ Shape broadcast_shapes(const Shape& a, const Shape& b) {
                                         " and " + std::to_string(db) + " are incompatible (" +
                                         shape_to_string(a) + " vs " + shape_to_string(b) + ")");
         }
-        result[ndim - 1 - i] = std::max(da, db);
+        // ось размера 1 растягивается до размера другой — в том числе до 0
+        result[ndim - 1 - i] = (da == 1) ? db : da;
     }
     return result;
 }
@@ -38,7 +39,7 @@ namespace {
 
 template <typename F>
 Tensor unary_op(const Tensor& a, F f) {
-    Tensor src = a.detach().contiguous();
+    const Tensor src = a.detach().contiguous();
     Tensor out = Tensor::zeros(src.shape());
     const float* x = src.data();
     float* y = out.data();
@@ -51,8 +52,8 @@ Tensor unary_op(const Tensor& a, F f) {
 template <typename F>
 Tensor binary_op(const Tensor& a, const Tensor& b, F f) {
     Shape shape = broadcast_shapes(a.shape(), b.shape());
-    Tensor ac = a.detach().expand(shape).contiguous();
-    Tensor bc = b.detach().expand(shape).contiguous();
+    const Tensor ac = a.detach().expand(shape).contiguous();
+    const Tensor bc = b.detach().expand(shape).contiguous();
     Tensor out = Tensor::zeros(shape);
     const float* x = ac.data();
     const float* y = bc.data();
@@ -209,21 +210,22 @@ Shape reduced_shape(Shape shape, std::size_t dim, bool keepdim) {
 }
 
 // Общая схема: смотрим на тензор как на [outer, size, inner]
-// и сворачиваем среднюю ось.
-template <typename Init, typename Combine>
-Tensor reduce_dim(const Tensor& a, std::size_t dim, bool keepdim, Init init, Combine combine) {
+// и сворачиваем среднюю ось. Тип аккумулятора задаёт init:
+// для суммы это double (меньше ошибка округления на длинных осях).
+template <typename Acc, typename Combine>
+Tensor reduce_dim(const Tensor& a, std::size_t dim, bool keepdim, Acc init, Combine combine) {
     DimSplit s = split_at(a.shape(), dim);
-    Tensor src = a.detach().contiguous();
+    const Tensor src = a.detach().contiguous();
     Tensor out = Tensor::zeros(reduced_shape(a.shape(), dim, keepdim));
     const float* x = src.data();
     float* y = out.data();
     for (std::size_t o = 0; o < s.outer; ++o) {
         for (std::size_t i = 0; i < s.inner; ++i) {
-            float acc = init;
+            Acc acc = init;
             for (std::size_t k = 0; k < s.size; ++k) {
                 acc = combine(acc, x[(o * s.size + k) * s.inner + i]);
             }
-            y[o * s.inner + i] = acc;
+            y[o * s.inner + i] = static_cast<float>(acc);
         }
     }
     return out;
@@ -232,7 +234,7 @@ Tensor reduce_dim(const Tensor& a, std::size_t dim, bool keepdim, Init init, Com
 } // namespace
 
 Tensor sum(const Tensor& a) {
-    Tensor src = a.detach().contiguous();
+    const Tensor src = a.detach().contiguous();
     const float* x = src.data();
     double acc = 0.0;  // double: меньше ошибка округления при длинной сумме
     for (std::size_t i = 0; i < src.numel(); ++i) {
@@ -246,7 +248,7 @@ Tensor sum(const Tensor& a) {
 }
 
 Tensor sum(const Tensor& a, std::size_t dim, bool keepdim) {
-    Tensor out = reduce_dim(a, dim, keepdim, 0.0f, [](float acc, float x) { return acc + x; });
+    Tensor out = reduce_dim(a, dim, keepdim, 0.0, [](double acc, float x) { return acc + x; });
     return record_op(out, {a}, "SumDimBackward",
                      [shape = a.shape(), dim, keepdim](const Tensor& g) {
                          Tensor gk = keepdim ? g : g.unsqueeze(dim);
@@ -265,8 +267,12 @@ Tensor mean(const Tensor& a, std::size_t dim, bool keepdim) {
 }
 
 Tensor max(const Tensor& a, std::size_t dim, bool keepdim) {
+    // NaN "заразен", как в PyTorch: если в строке есть NaN, максимум — NaN.
+    // Иначе испорченное обучение выглядело бы нормальным.
     Tensor out = reduce_dim(a, dim, keepdim, -std::numeric_limits<float>::infinity(),
-                            [](float acc, float x) { return x > acc ? x : acc; });
+                            [](float acc, float x) {
+                                return (x > acc || std::isnan(x)) && !std::isnan(acc) ? x : acc;
+                            });
     // градиент идёт только в элемент, который оказался максимумом
     return record_op(out, {a}, "MaxBackward", [a, dim, keepdim](const Tensor& g) {
         Tensor m = max(a, dim, /*keepdim=*/true);
@@ -278,7 +284,7 @@ Tensor max(const Tensor& a, std::size_t dim, bool keepdim) {
 
 Tensor argmax(const Tensor& a, std::size_t dim) {
     DimSplit s = split_at(a.shape(), dim);
-    Tensor src = a.detach().contiguous();
+    const Tensor src = a.detach().contiguous();
     Tensor out = Tensor::zeros(reduced_shape(a.shape(), dim, /*keepdim=*/false));
     const float* x = src.data();
     float* y = out.data();
@@ -288,7 +294,9 @@ Tensor argmax(const Tensor& a, std::size_t dim) {
             float best_value = -std::numeric_limits<float>::infinity();
             for (std::size_t k = 0; k < s.size; ++k) {
                 float v = x[(o * s.size + k) * s.inner + i];
-                if (v > best_value) {
+                // NaN считается максимумом (как в PyTorch) — индекс первого NaN
+                if (std::isnan(best_value)) break;
+                if (v > best_value || std::isnan(v)) {
                     best_value = v;
                     best = k;
                 }
@@ -327,8 +335,8 @@ Tensor matmul_values(const Tensor& a, const Tensor& b) {
     std::size_t n = a.shape()[0];
     std::size_t k = a.shape()[1];
     std::size_t m = b.shape()[1];
-    Tensor ac = a.detach().contiguous();
-    Tensor bc = b.detach().contiguous();
+    const Tensor ac = a.detach().contiguous();
+    const Tensor bc = b.detach().contiguous();
     Tensor out = Tensor::zeros({n, m});
     const float* A = ac.data();
     const float* B = bc.data();

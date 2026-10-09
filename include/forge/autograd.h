@@ -17,6 +17,16 @@ struct Node {
     std::string name;            // для отладки: "AddBackward", "MatmulBackward"...
     std::vector<Tensor> inputs;  // входы операции
     BackwardFn backward;         // как посчитать их градиенты
+    // Версии данных входов в момент forward: если вход потом изменили,
+    // backward посчитал бы градиент не для тех чисел — это ошибка.
+    std::vector<std::size_t> saved_versions;
+
+    Node() = default;
+    // Разбирает длинную цепочку узлов циклом, а не рекурсией:
+    // иначе граф из сотен тысяч операций переполнил бы стек при удалении.
+    ~Node();
+    Node(const Node&) = delete;
+    Node& operator=(const Node&) = delete;
 };
 
 // Глобальный (на поток) переключатель: строить ли граф.

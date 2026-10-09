@@ -2,6 +2,7 @@
 #include <forge/tensor.h>
 
 #include <cmath>
+#include <mutex>
 #include <random>
 #include <stdexcept>
 #include <string>
@@ -63,6 +64,13 @@ std::mt19937& generator() {
     return gen;
 }
 
+// Генератор общий для всей программы. Мьютекс не даёт двум потокам
+// одновременно менять его состояние (иначе — гонка данных и UB).
+std::mutex& generator_mutex() {
+    static std::mutex m;
+    return m;
+}
+
 std::shared_ptr<TensorImpl> make_impl(std::shared_ptr<Storage> storage, const Shape& shape) {
     auto impl = std::make_shared<TensorImpl>();
     impl->storage = std::move(storage);
@@ -101,7 +109,10 @@ std::size_t flat_index(const TensorImpl& impl, const Shape& index) {
 
 } // namespace
 
-void manual_seed(unsigned seed) { generator().seed(seed); }
+void manual_seed(unsigned seed) {
+    std::lock_guard<std::mutex> lock(generator_mutex());
+    generator().seed(seed);
+}
 
 // ============================================================
 // Tensor: конструктор и фабрики
@@ -151,6 +162,7 @@ Tensor Tensor::arange(float start, float end, float step) {
 Tensor Tensor::randn(const Shape& shape) {
     std::normal_distribution<float> dist(0.0f, 1.0f);
     std::vector<float> data(forge::numel(shape));
+    std::lock_guard<std::mutex> lock(generator_mutex());
     for (float& x : data) {
         x = dist(generator());
     }
@@ -160,6 +172,7 @@ Tensor Tensor::randn(const Shape& shape) {
 Tensor Tensor::rand(const Shape& shape) {
     std::uniform_real_distribution<float> dist(0.0f, 1.0f);
     std::vector<float> data(forge::numel(shape));
+    std::lock_guard<std::mutex> lock(generator_mutex());
     for (float& x : data) {
         x = dist(generator());
     }
@@ -201,7 +214,9 @@ bool Tensor::is_contiguous() const {
 
 float& Tensor::at(const Shape& index) {
     TensorImpl* impl = get();
-    return impl->storage->data()[flat_index(*impl, index)];
+    std::size_t pos = flat_index(*impl, index);
+    impl->storage->bump_version();  // отдаём ссылку на запись
+    return impl->storage->data()[pos];
 }
 
 float Tensor::at(const Shape& index) const {
@@ -220,6 +235,7 @@ float Tensor::item() const {
 
 float* Tensor::data() {
     TensorImpl* impl = get();
+    impl->storage->bump_version();  // отдаём указатель на запись
     return impl->storage->data() + impl->offset;
 }
 

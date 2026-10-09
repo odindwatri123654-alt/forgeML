@@ -28,6 +28,38 @@ NoGradGuard::NoGradGuard() : previous_(GradMode::is_enabled()) { GradMode::set_e
 NoGradGuard::~NoGradGuard() { GradMode::set_enabled(previous_); }
 
 // ============================================================
+// Node: удаление длинного графа без рекурсии
+// ============================================================
+
+// Обычное удаление рекурсивно: узел удаляет свои входы, их TensorImpl
+// удаляют свои grad_fn, те — свои входы... Глубина рекурсии = длина графа.
+// Здесь мы "отцепляем" узлы, которые больше никому не нужны, и удаляем их
+// по одному в цикле.
+Node::~Node() {
+    std::vector<std::shared_ptr<Node>> pending;
+    auto detach_inputs = [&pending](Node& node) {
+        node.backward = nullptr;  // лямбда тоже держит входы — отпускаем её первой
+        for (Tensor& input : node.inputs) {
+            const std::shared_ptr<TensorImpl>& impl = input.impl();
+            // этот узел — единственный владелец входа: его grad_fn удалим сами
+            if (impl && impl.use_count() == 1 && impl->grad_fn) {
+                pending.push_back(std::move(impl->grad_fn));
+            }
+        }
+        node.inputs.clear();
+    };
+    detach_inputs(*this);
+    while (!pending.empty()) {
+        std::shared_ptr<Node> node = std::move(pending.back());
+        pending.pop_back();
+        if (node.use_count() == 1) {
+            detach_inputs(*node);
+        }
+        // здесь node удаляется, но его входы уже отцеплены — рекурсии нет
+    }
+}
+
+// ============================================================
 // Запись операции в граф
 // ============================================================
 
@@ -47,6 +79,9 @@ Tensor record_op(Tensor out, std::vector<Tensor> inputs, std::string name, Backw
     }
     auto node = std::make_shared<Node>();
     node->name = std::move(name);
+    for (const Tensor& input : inputs) {
+        node->saved_versions.push_back(input.impl()->storage->version());
+    }
     node->inputs = std::move(inputs);
     node->backward = std::move(backward);
 
@@ -78,19 +113,32 @@ namespace {
 
 // Обход в глубину: кладём узел в order только ПОСЛЕ всех его входов.
 // Тогда в обратном порядке каждый узел идёт раньше своих входов.
-void build_topo(TensorImpl* impl, std::unordered_set<TensorImpl*>& visited,
+// Обход сделан явным стеком, а не рекурсией: глубина графа может быть
+// сотни тысяч операций, а стек потока — всего 1 МБ (Windows).
+void build_topo(TensorImpl* root, std::unordered_set<TensorImpl*>& visited,
                 std::vector<TensorImpl*>& order) {
-    if (!visited.insert(impl).second) {
-        return;  // уже были здесь (тензор использован в графе несколько раз)
-    }
-    if (impl->grad_fn) {
-        for (const Tensor& input : impl->grad_fn->inputs) {
-            if (input.requires_grad()) {
-                build_topo(input.impl().get(), visited, order);
+    struct Frame {
+        TensorImpl* impl;
+        std::size_t next_input;  // какой вход обойти следующим
+    };
+    std::vector<Frame> stack;
+    visited.insert(root);
+    stack.push_back({root, 0});
+    while (!stack.empty()) {
+        Frame& top = stack.back();
+        const Node* node = top.impl->grad_fn.get();
+        if (node && top.next_input < node->inputs.size()) {
+            const Tensor& input = node->inputs[top.next_input++];
+            TensorImpl* child = input.impl().get();
+            // visited: тензор может быть входом нескольких операций
+            if (input.requires_grad() && visited.insert(child).second) {
+                stack.push_back({child, 0});  // top после этого недействителен
             }
+        } else {
+            order.push_back(top.impl);  // все входы обойдены
+            stack.pop_back();
         }
     }
-    order.push_back(impl);
 }
 
 } // namespace
@@ -143,6 +191,14 @@ void Tensor::backward(const Tensor& grad) const {
         }
 
         const Node& node = *impl->grad_fn;
+        for (std::size_t i = 0; i < node.inputs.size(); ++i) {
+            if (node.inputs[i].impl()->storage->version() != node.saved_versions[i]) {
+                throw std::runtime_error(
+                    "backward(): input " + std::to_string(i) + " of " + node.name +
+                    " was modified after the forward pass (for example, optimizer.step() "
+                    "was called before backward()); recompute the forward pass");
+            }
+        }
         std::vector<Tensor> input_grads = node.backward(g);
         if (input_grads.size() != node.inputs.size()) {
             throw std::logic_error(node.name + ": returned wrong number of gradients");

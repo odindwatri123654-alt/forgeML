@@ -177,7 +177,11 @@ QA_TEST(modify_after_forward, "6. Autograd",
     auto w = Tensor::from_vector({1}, {1}).requires_grad_();
     auto loss = sum(w * w);  // d/dw = 2w = 2 в момент forward
     w.data()[0] = 10.0f;     // "случайно" поменяли вес до backward
-    loss.backward();
+    try {
+        loss.backward();
+    } catch (const std::runtime_error&) {
+        return;  // понятная ошибка — правильное поведение (как в PyTorch)
+    }
     EXPECT(w.grad().item() == 2.0f,
            "градиент для значения из forward (2) или ошибка; получено " + qa::str(w.grad().item()));
 }

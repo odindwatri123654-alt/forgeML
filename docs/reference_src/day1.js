@@ -26,13 +26,14 @@ module.exports = ({ p, h1, h2, h3, bullets, code, entry, table }) => [
   }),
   ...entry({
     name: 'class `Storage`', file: 'include/forge/tensor.h, src/tensor.cpp',
-    sig: ['class Storage {', 'public:', '    explicit Storage(std::size_t size, float value = 0.0f);', '    explicit Storage(std::vector<float> data);', '    float* data();', '    const float* data() const;', '    std::size_t size() const;', 'private:', '    std::vector<float> data_;', '};'],
+    sig: ['class Storage {', 'public:', '    explicit Storage(std::size_t size, float value = 0.0f);', '    explicit Storage(std::vector<float> data);', '    float* data();', '    const float* data() const;', '    std::size_t size() const;', '    std::size_t version() const;   // счётчик изменений (после QA)', '    void bump_version();', 'private:', '    std::vector<float> data_;', '    std::size_t version_ = 0;', '};'],
     what: 'Владеет плоским массивом чисел. Ничего не знает о форме — это просто «мешок с числами».',
     how: [
       '`Storage(size, value)` — создаёт `size` чисел, равных `value`. Тело: `: data_(size, value) {}` — список инициализации.',
       '`Storage(std::vector<float> data)` — забирает готовый вектор через `std::move`, без копирования.',
       '`data()` — указатель на первое число. Две версии: обычная (можно писать) и `const` (только читать).',
       '`size()` — сколько чисел в буфере.',
+      '`version()` / `bump_version()` — счётчик изменений, добавлен при исправлении дефекта D7 (см. «День 3» и «День 7»): растёт при каждом доступе на запись.',
     ],
     notes: ['`explicit` запрещает неявное превращение числа в Storage: без него `Storage s = 5;` молча скомпилировалось бы.', 'Storage всегда живёт внутри `shared_ptr`, чтобы несколько тензоров (views) могли делить одну память.'],
   }),
@@ -143,7 +144,7 @@ module.exports = ({ p, h1, h2, h3, bullets, code, entry, table }) => [
     what: 'Возвращает элемент по многомерному индексу.',
     how: ['Вычисляет позицию функцией `flat_index` и берёт `storage->data()[позиция]`.', 'Не-const версия возвращает ссылку `float&`, поэтому можно присваивать: `t.at({0, 1}) = 5;`.'],
     example: ['auto t = Tensor::from_vector({1, 2, 3, 4, 5, 6}, {2, 3});', 't.at({1, 0});         // 4', 't.at({0, 1}) = 100;   // запись'],
-    notes: ['Неверное число индексов → `std::invalid_argument`; индекс за границей → `std::out_of_range`.'],
+    notes: ['Неверное число индексов → `std::invalid_argument`; индекс за границей → `std::out_of_range`.', 'Неконстантный `at()` (и неконстантный `data()`) увеличивает `Storage::version()` — это считается записью. Чтобы только прочитать значение между forward и backward, вызывайте `at()` у `const Tensor&` или используйте `item()`.'],
   }),
   ...entry({
     name: '`item()`',
@@ -195,7 +196,7 @@ module.exports = ({ p, h1, h2, h3, bullets, code, entry, table }) => [
     name: '`generator()`',
     sig: ['std::mt19937& generator() {', '    static std::mt19937 gen(42);', '    return gen;', '}'],
     what: 'Единственный на всю программу генератор случайных чисел.',
-    how: ['`static` внутри функции: переменная создаётся один раз при первом вызове и живёт до конца программы.', '`std::mt19937` — алгоритм «Вихрь Мерсенна», 42 — начальное зерно.'],
+    how: ['`static` внутри функции: переменная создаётся один раз при первом вызове и живёт до конца программы.', '`std::mt19937` — алгоритм «Вихрь Мерсенна», 42 — начальное зерно.', 'Защищён мьютексом `generator_mutex()`: `randn`, `rand` и `manual_seed` берут `std::lock_guard`, поэтому генератор можно использовать из нескольких потоков (исправление D5).'],
   }),
   ...entry({
     name: '`make_impl(storage, shape)`',

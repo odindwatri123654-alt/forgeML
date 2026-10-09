@@ -74,7 +74,8 @@ forgeml/
 │   ├── xor.cpp               сеть выучивает XOR
 │   ├── regression.cpp        сеть приближает sin(x)
 │   └── mnist.cpp             распознавание цифр MNIST
-├── tests/                    41 тест, включая численную проверку всех градиентов
+├── tests/                    51 тест: численная проверка всех градиентов + регрессии
+├── qa/                       71 сценарий «чёрного ящика» и отчёт QA_REPORT.md
 ├── scripts/                  скачивание MNIST (PowerShell и bash)
 └── docs/ForgeML_reference.docx   справочник по каждому классу и методу
 ```
@@ -192,7 +193,21 @@ train: 60000 картинок, test: 10000
 - `ops_*` — операции, broadcasting, редукции, softmax, matmul;
 - `autograd_*` и `gradcheck_*` — **каждый** градиент сравнивается с численной производной
   `(f(x+ε) − f(x−ε)) / 2ε`;
-- `nn_*`, `optim_*`, `train_xor`, `save_and_load_roundtrip`, `dataloader_batches`.
+- `nn_*`, `optim_*`, `train_xor`, `save_and_load_roundtrip`, `dataloader_batches`;
+- `regression_d1` … `regression_d9` — по тесту на каждый исправленный дефект из
+  [`qa/QA_REPORT.md`](qa/QA_REPORT.md).
+
+### QA-набор (тесты «чёрного ящика»)
+
+```powershell
+.\build\Release\forge_qa.exe            # 71 сценарий, каждый в отдельном процессе
+.\build\Release\forge_qa.exe --list     # список
+```
+
+Сценарии написаны по этому README, как их написал бы пользователь: граничные случаи,
+неправильное использование, обучение на задачах с известным ответом, испорченные файлы,
+нагрузка и потоки. Падение программы фиксируется как `CRASH` и не останавливает прогон.
+Результаты и найденные дефекты — в [`qa/QA_REPORT.md`](qa/QA_REPORT.md).
 
 Добавить тест — написать в любом файле из `tests/`:
 
@@ -273,6 +288,17 @@ auto frozen = w.detach(); // те же данные, но вне графа
 
 `backward()` без аргумента работает только для скаляра; для тензора передайте градиент
 выхода: `y.backward(Tensor::ones(y.shape()))`.
+
+**Изменение данных до backward.** Если тензор, использованный в forward, изменили до
+`backward()` (типичная ошибка — `optimizer.step()` раньше `loss.backward()`), backward
+бросит `std::runtime_error` вместо тихо неверного градиента. Изменением считается доступ
+через **неконстантные** `data()` и `at()`; чтобы только прочитать значение между forward и
+backward, используйте `item()`, печать или `const Tensor&`:
+
+```cpp
+const Tensor& w_read = w;
+float v = w_read.at({0, 0});   // чтение — не изменение
+```
 
 ### Слои и модели
 
@@ -380,13 +406,24 @@ Tensor (handle)  ──shared_ptr──►  TensorImpl  ──shared_ptr──�
 
 `loss.backward()`:
 
-1. обходом в глубину строит топологический порядок графа;
+1. обходом в глубину (явным стеком, без рекурсии) строит топологический порядок графа;
 2. идёт от `loss` к листьям, вызывая `Node::backward` и **суммируя** градиенты тензоров,
    использованных несколько раз;
 3. у листьев (параметров) накапливает результат в `.grad()`.
 
 Градиенты broadcasting сворачиваются функцией `sum_to_shape`. Обратный проход выполняется
 под `NoGradGuard`, поэтому сам в граф не попадает.
+
+Каждый `Storage` хранит счётчик версий; узел графа запоминает версии входов в момент
+forward, а backward сверяет их. Графы любой длины (проверено на 1 000 000 операций при
+стеке 1 МБ) обходятся и удаляются без рекурсии.
+
+### Потоки
+
+`NoGradGuard` действует только на свой поток. Общий генератор случайных чисел
+(`randn`, `rand`, инициализация слоёв, `Dropout`) защищён мьютексом, поэтому модели можно
+создавать и обучать в разных потоках. Один и тот же тензор или модель одновременно из
+нескольких потоков менять нельзя.
 
 ### Производительность
 
@@ -440,6 +477,7 @@ Tensor softplus(const Tensor& a) {
 | `cannot open .../train-images-idx3-ubyte` | не скачан MNIST — запустите `scripts/download_mnist.ps1` |
 | MNIST обучается очень медленно | собрана Debug-версия. Выберите вариант **Release** |
 | `Tensor is undefined` | обращение к пустому тензору: например, `w.grad()` до `backward()` или после `zero_grad()` |
+| `backward(): input N of ... was modified after the forward pass` | данные, участвовавшие в forward, изменены до backward (например, `optimizer.step()` раньше `loss.backward()` или чтение через неконстантный `at()`). Пересчитайте forward или читайте через `const Tensor&` |
 | `backward(): output has N elements` | `backward()` без аргумента — только для скаляра; сверните loss через `sum`/`mean` |
 | `broadcast_shapes(): sizes 3 and 2 are incompatible` | формы не подходят для broadcasting; проверьте `shape()` операндов |
 | `view(): tensor is not contiguous` | после `transpose`/`permute` используйте `reshape` |

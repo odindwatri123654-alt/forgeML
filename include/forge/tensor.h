@@ -21,8 +21,15 @@ public:
     const float* data() const;
     std::size_t size() const;
 
+    // Счётчик изменений: растёт при каждом доступе на запись (неконстантные
+    // Tensor::data() и Tensor::at()). По нему autograd узнаёт, что данные,
+    // использованные в forward, поменяли до backward.
+    std::size_t version() const { return version_; }
+    void bump_version() { ++version_; }
+
 private:
     std::vector<float> data_;
+    std::size_t version_ = 0;
 };
 
 // "Тело" тензора: как интерпретировать Storage.
@@ -62,6 +69,8 @@ public:
     bool is_contiguous() const;
 
     // --- доступ: t.at({1, 2}) ---
+    // Неконстантные at() и data() считаются записью (см. Storage::version):
+    // чтобы только прочитать, вызывайте их у const Tensor или используйте item().
     float& at(const Shape& index);
     float at(const Shape& index) const;
     float item() const;                  // значение тензора из одного элемента
