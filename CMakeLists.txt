@@ -14,6 +14,7 @@ endif()
 option(FORGE_BUILD_TESTS    "Собирать тесты"                 ON)
 option(FORGE_BUILD_EXAMPLES "Собирать примеры"               ON)
 option(FORGE_USE_OPENMP     "Параллелить matmul через OpenMP" ON)
+option(FORGE_BUILD_QA       "Собирать QA-набор (тесты чёрного ящика)" ON)
 
 # MSVC: читать все исходники как UTF-8 (в коде есть русские комментарии)
 if(MSVC)
@@ -72,4 +73,17 @@ if(FORGE_BUILD_TESTS)
     )
     target_link_libraries(forge_tests PRIVATE forge)
     add_test(NAME forge_tests COMMAND forge_tests)
+endif()
+
+# --- QA: тесты "чёрного ящика", каждый в своём процессе (запуск: forge_qa) ---
+if(FORGE_BUILD_QA)
+    find_package(Threads REQUIRED)
+    add_executable(forge_qa
+        qa/qa_main.cpp
+        qa/qa_basics.cpp
+        qa/qa_autograd.cpp
+        qa/qa_training.cpp
+        qa/qa_stress.cpp
+    )
+    target_link_libraries(forge_qa PRIVATE forge Threads::Threads)
 endif()
